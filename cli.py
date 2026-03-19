@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import asyncio
 import os
 import re
 import sys
@@ -9,12 +10,17 @@ from tabulate import tabulate
 
 import db
 import scraper
+import filter as pain_filter
+import analyzer
+import reporter
+import validator
+from x_scraper import XScraper, ScraperConfig
+from models import Tweet
 
 
 def load_config(path: str = "config.yaml") -> dict:
     with open(path) as f:
         raw = f.read()
-    # Substitute ${ENV_VAR} with environment variable values
     def _env_sub(match):
         var = match.group(1)
         val = os.environ.get(var, "")
@@ -39,68 +45,158 @@ def cmd_scrape(args, config):
 
 
 def cmd_scrape_x(args, config):
-    print("Not yet implemented: X/Twitter scraping")
+    db_path = config["storage"]["db_path"]
+    db.init_db(db_path)
+
+    x_cfg = config.get("x", {})
+    queries = [args.query] if args.query else x_cfg.get("search_queries", [])
+    if not queries:
+        print("Error: no search queries configured. Use --query or set x.search_queries in config.yaml", file=sys.stderr)
+        sys.exit(1)
+
+    limit = args.limit or x_cfg.get("max_results", 100)
+    max_pages = max(1, limit // 20)
+
+    scraper_config = ScraperConfig(
+        query_id=x_cfg.get("graphql_query_ids", {}).get("search", ScraperConfig.query_id),
+        delay_between_requests=x_cfg.get("delay_seconds", 2.0),
+        max_pages=max_pages,
+    )
+
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    total_tweets = 0
+
+    def store_tweet(tweet_data: dict) -> None:
+        nonlocal total_tweets
+        t = Tweet(
+            id=tweet_data["tweet_id"],
+            text=tweet_data["body"],
+            author=tweet_data["author_handle"],
+            likes=tweet_data["like_count"],
+            retweets=tweet_data["retweet_count"],
+            replies=tweet_data["reply_count"],
+            url=tweet_data["url"],
+            created_at=tweet_data["created_at"],
+            scraped_at=now,
+            search_query=current_query,
+        )
+        if db.insert_tweet(db_path, t):
+            total_tweets += 1
+
+    async def run():
+        async with XScraper(config=scraper_config, store_tweet=store_tweet) as xs:
+            await xs.authenticate()
+            for query in queries:
+                nonlocal current_query
+                current_query = query
+                print(f"Searching X for: '{query}'...")
+                tweets = await xs.search(query, max_pages=max_pages)
+                print(f"  Found {len(tweets)} tweets")
+
+    current_query = ""
+    try:
+        asyncio.run(run())
+        print(f"\nDone: {total_tweets} new tweets stored")
+    except Exception as e:
+        print(f"X scraper error: {e}", file=sys.stderr)
+        print("Reddit pipeline unaffected.")
 
 
 def cmd_scrape_all(args, config):
     db_path = config["storage"]["db_path"]
     db.init_db(db_path)
-    print("Scraping all configured subreddits...")
+    print("=== Reddit ===")
     all_stats = scraper.scrape_all(config, db_path)
-    print("\nSummary:")
+    print("\nReddit Summary:")
     table = []
     for sub, stats in all_stats.items():
         table.append([sub, stats["posts_new"], stats["posts_skipped"], stats["comments_new"]])
     print(tabulate(table, headers=["Subreddit", "New Posts", "Skipped", "New Comments"], tablefmt="simple"))
 
+    print("\n=== X/Twitter ===")
+    cmd_scrape_x(args, config)
+
 
 def cmd_filter(args, config):
-    print("Not yet implemented: filtering")
+    db_path = config["storage"]["db_path"]
+    db.init_db(db_path)
+    print("Running pre-filters on all content...")
+    results = pain_filter.run_all_filters(config)
+    print(f"Posts:    {results['posts']['passed']} passed / {results['posts']['failed']} filtered")
+    print(f"Comments: {results['comments']['passed']} passed / {results['comments']['failed']} filtered")
+    print(f"Tweets:   {results['tweets']['passed']} passed / {results['tweets']['failed']} filtered")
+    print(f"Overall:  {results['summary']['filter_rate_pct']}% filtered out")
 
 
 def cmd_analyze(args, config):
+    db_path = config["storage"]["db_path"]
+    db.init_db(db_path)
+    result = analyzer.run_analysis(config, dry_run=args.dry_run)
     if args.dry_run:
-        print("Not yet implemented: analyze --dry-run")
+        print(f"\n[DRY RUN] Total items that would be analyzed: {result.get('total_items', 0)}")
+    elif result.get("skipped_cap"):
+        print("Daily API cap reached.")
     else:
-        print("Not yet implemented: Claude analysis")
+        print(f"Analyzed {result['analyzed']} items out of {result.get('total_items', 0)} queued.")
 
 
 def cmd_validate(args, config):
-    print("Not yet implemented: cross-platform validation")
+    db_path = config["storage"]["db_path"]
+    db.init_db(db_path)
+    print("Running cross-platform validation...")
+    result = validator.validate_cross_platform(config)
+    print(f"Newly validated:      {result['newly_validated']}")
+    print(f"Already validated:    {result['already_validated']}")
+    print(f"Reddit items checked: {result['reddit_checked']}")
+    print(f"X items checked:      {result['x_checked']}")
+    print(f"Boost multiplier:     {result['boost_multiplier']}x")
 
 
 def cmd_pipeline(args, config):
     db_path = config["storage"]["db_path"]
     db.init_db(db_path)
+
     print("=== Step 1: Scrape Reddit ===")
     scraper.scrape_all(config, db_path)
+
     print("\n=== Step 2: Scrape X ===")
-    print("Not yet implemented: X/Twitter scraping")
+    cmd_scrape_x(args, config)
+
     print("\n=== Step 3: Filter ===")
-    print("Not yet implemented: filtering")
+    results = pain_filter.run_all_filters(config)
+    print(f"Passed: {results['summary']['total_passed']} / {results['summary']['total_processed']} ({results['summary']['filter_rate_pct']}% filtered)")
+
     print("\n=== Step 4: Analyze ===")
-    print("Not yet implemented: Claude analysis")
+    result = analyzer.run_analysis(config)
+    print(f"Analyzed: {result['analyzed']} items")
+
     print("\n=== Step 5: Validate ===")
-    print("Not yet implemented: cross-platform validation")
-    print("\nPipeline complete (partial — only Reddit scraping active).")
+    result = validator.validate_cross_platform(config)
+    print(f"Validated: {result['newly_validated']} pain points across platforms")
+
+    print("\nPipeline complete.")
 
 
 def cmd_report(args, config):
-    print("Not yet implemented: reporting")
+    db_path = config["storage"]["db_path"]
+    db.init_db(db_path)
+    results = reporter.get_pain_points(
+        category=args.category,
+        min_score=args.min_score,
+        validated_only=args.validated_only,
+        limit=50,
+    )
+    if args.csv:
+        reporter.export_csv(results, args.csv)
+    else:
+        reporter.print_table(results)
 
 
 def cmd_stats(args, config):
     db_path = config["storage"]["db_path"]
     db.init_db(db_path)
-    stats = db.get_stats(db_path)
-    print("Database Statistics:")
-    print(f"  Posts:            {stats['posts']}")
-    print(f"  Comments:         {stats['comments']}")
-    print(f"  Tweets:           {stats['tweets']}")
-    print(f"  Pain Points:      {stats['pain_points']}")
-    print(f"  Validated:        {stats['validated_pain_points']}")
-    if stats["subreddits"]:
-        print(f"  Subreddits:       {', '.join(stats['subreddits'])}")
+    reporter.print_detailed_stats()
 
 
 def main():
@@ -114,35 +210,35 @@ def main():
     p_scrape.add_argument("--limit", "-l", type=int, default=None, help="Max posts to fetch")
 
     # scrape-x
-    p_scrape_x = subparsers.add_parser("scrape-x", help="Scrape X/Twitter (stub)")
+    p_scrape_x = subparsers.add_parser("scrape-x", help="Scrape X/Twitter")
     p_scrape_x.add_argument("--query", "-q", help="Search query")
     p_scrape_x.add_argument("--limit", "-l", type=int, default=None, help="Max tweets")
 
     # scrape-all
-    subparsers.add_parser("scrape-all", help="Scrape all configured subreddits")
+    subparsers.add_parser("scrape-all", help="Scrape all configured subreddits + X")
 
     # filter
-    subparsers.add_parser("filter", help="Filter scraped content for pain points (stub)")
+    subparsers.add_parser("filter", help="Filter scraped content for pain points")
 
     # analyze
-    p_analyze = subparsers.add_parser("analyze", help="Analyze with Claude (stub)")
+    p_analyze = subparsers.add_parser("analyze", help="Analyze with Claude")
     p_analyze.add_argument("--dry-run", action="store_true", help="Preview without API calls")
 
     # validate
-    subparsers.add_parser("validate", help="Cross-platform validation (stub)")
+    subparsers.add_parser("validate", help="Cross-platform validation")
 
     # pipeline
-    subparsers.add_parser("pipeline", help="Run full scrape → filter → analyze → validate pipeline")
+    subparsers.add_parser("pipeline", help="Run full scrape -> filter -> analyze -> validate pipeline")
 
     # report
-    p_report = subparsers.add_parser("report", help="Generate reports (stub)")
+    p_report = subparsers.add_parser("report", help="Generate reports")
     p_report.add_argument("--category", help="Filter by category")
-    p_report.add_argument("--min-score", type=float, default=0.0, help="Minimum severity score")
+    p_report.add_argument("--min-score", type=float, default=0.0, help="Minimum opportunity score")
     p_report.add_argument("--validated-only", action="store_true", help="Only validated pain points")
-    p_report.add_argument("--csv", action="store_true", help="Output as CSV")
+    p_report.add_argument("--csv", metavar="FILE", help="Export to CSV file")
 
     # stats
-    subparsers.add_parser("stats", help="Show database statistics")
+    subparsers.add_parser("stats", help="Show pipeline statistics")
 
     args = parser.parse_args()
     if not args.command:

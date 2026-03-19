@@ -44,25 +44,24 @@ def _count_keyword_matches(text: str, keywords: list[str]) -> int:
 
 
 def filter_posts(config: dict) -> dict:
-    """Filter posts by keyword matches and engagement thresholds.
-
-    Returns dict with counts of passed/failed posts.
-    """
+    """Filter posts by keyword matches and engagement thresholds."""
     db = get_db()
-    keywords = config.get("pain_keywords", DEFAULT_PAIN_KEYWORDS)
-    keyword_threshold = config.get("keyword_threshold", 1)
+    filter_cfg = config.get("filter", {})
+    keywords = filter_cfg.get("pain_keywords", DEFAULT_PAIN_KEYWORDS)
+    thresholds = filter_cfg.get("thresholds", {})
+    keyword_threshold = thresholds.get("posts", 1)
     post_min_score = config.get("post_min_score", 5)
     post_min_comments = config.get("post_min_comments", 3)
 
     posts = db.execute(
-        "SELECT id, title, body, score, num_comments FROM posts WHERE is_pain_point IS NULL"
+        "SELECT id, title, selftext, score, num_comments FROM posts WHERE is_pain_point IS NULL"
     ).fetchall()
 
     passed = 0
     failed = 0
 
     for post in posts:
-        text = f"{post['title'] or ''} {post['body'] or ''}"
+        text = f"{post['title'] or ''} {post['selftext'] or ''}"
         matches = _count_keyword_matches(text, keywords)
         score_ok = (post["score"] or 0) >= post_min_score
         comments_ok = (post["num_comments"] or 0) >= post_min_comments
@@ -75,14 +74,17 @@ def filter_posts(config: dict) -> dict:
             failed += 1
 
     db.commit()
+    db.close()
     return {"passed": passed, "failed": failed, "total": passed + failed}
 
 
 def filter_comments(config: dict) -> dict:
     """Filter comments by keyword matches and engagement thresholds."""
     db = get_db()
-    keywords = config.get("pain_keywords", DEFAULT_PAIN_KEYWORDS)
-    keyword_threshold = config.get("keyword_threshold", 1)
+    filter_cfg = config.get("filter", {})
+    keywords = filter_cfg.get("pain_keywords", DEFAULT_PAIN_KEYWORDS)
+    thresholds = filter_cfg.get("thresholds", {})
+    keyword_threshold = thresholds.get("comments", 1)
     comment_min_score = config.get("comment_min_score", 2)
 
     comments = db.execute(
@@ -105,25 +107,28 @@ def filter_comments(config: dict) -> dict:
             failed += 1
 
     db.commit()
+    db.close()
     return {"passed": passed, "failed": failed, "total": passed + failed}
 
 
 def filter_tweets(config: dict) -> dict:
     """Filter tweets by keyword matches and engagement thresholds."""
     db = get_db()
-    keywords = config.get("pain_keywords", DEFAULT_PAIN_KEYWORDS)
-    keyword_threshold = config.get("keyword_threshold", 1)
+    filter_cfg = config.get("filter", {})
+    keywords = filter_cfg.get("pain_keywords", DEFAULT_PAIN_KEYWORDS)
+    thresholds = filter_cfg.get("thresholds", {})
+    keyword_threshold = thresholds.get("tweets", 1)
     tweet_min_likes = config.get("tweet_min_likes", 3)
 
     tweets = db.execute(
-        "SELECT id, body, likes FROM tweets WHERE is_pain_point IS NULL"
+        "SELECT id, text, likes FROM tweets WHERE is_pain_point IS NULL"
     ).fetchall()
 
     passed = 0
     failed = 0
 
     for tweet in tweets:
-        text = tweet["body"] or ""
+        text = tweet["text"] or ""
         matches = _count_keyword_matches(text, keywords)
         likes_ok = (tweet["likes"] or 0) >= tweet_min_likes
 
@@ -135,6 +140,7 @@ def filter_tweets(config: dict) -> dict:
             failed += 1
 
     db.commit()
+    db.close()
     return {"passed": passed, "failed": failed, "total": passed + failed}
 
 
@@ -155,16 +161,3 @@ def run_all_filters(config: dict) -> dict:
         "filter_rate_pct": round(filter_rate, 1),
     }
     return results
-
-
-if __name__ == "__main__":
-    import yaml
-
-    with open("config.yaml") as f:
-        config = yaml.safe_load(f)
-
-    results = run_all_filters(config)
-    print(f"Posts:    {results['posts']['passed']} passed / {results['posts']['failed']} filtered")
-    print(f"Comments: {results['comments']['passed']} passed / {results['comments']['failed']} filtered")
-    print(f"Tweets:   {results['tweets']['passed']} passed / {results['tweets']['failed']} filtered")
-    print(f"Overall:  {results['summary']['filter_rate_pct']}% filtered out")

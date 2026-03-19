@@ -5,6 +5,16 @@ from typing import Optional
 
 from models import Comment, PainPoint, Post, Tweet
 
+_default_db_path: str | None = None
+
+
+def get_db(db_path: str | None = None) -> sqlite3.Connection:
+    """Get a database connection. Uses the module-level default if no path given."""
+    path = db_path or _default_db_path
+    if not path:
+        raise RuntimeError("No db_path set. Call init_db() first or pass db_path.")
+    return _get_connection(path)
+
 
 def _get_connection(db_path: str) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -16,6 +26,8 @@ def _get_connection(db_path: str) -> sqlite3.Connection:
 
 
 def init_db(db_path: str) -> None:
+    global _default_db_path
+    _default_db_path = db_path
     conn = _get_connection(db_path)
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS posts (
@@ -28,7 +40,8 @@ def init_db(db_path: str) -> None:
             num_comments INTEGER,
             url TEXT,
             created_utc REAL,
-            scraped_at TEXT
+            scraped_at TEXT,
+            is_pain_point INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS comments (
@@ -41,6 +54,7 @@ def init_db(db_path: str) -> None:
             depth INTEGER,
             created_utc REAL,
             scraped_at TEXT,
+            is_pain_point INTEGER,
             FOREIGN KEY (post_id) REFERENCES posts(id)
         );
 
@@ -53,26 +67,26 @@ def init_db(db_path: str) -> None:
             replies INTEGER,
             url TEXT,
             created_at TEXT,
-            scraped_at TEXT
+            scraped_at TEXT,
+            search_query TEXT,
+            is_pain_point INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS pain_points (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            description TEXT,
-            category TEXT,
-            severity REAL,
-            frequency REAL,
-            market_size TEXT,
-            source_platform TEXT,
-            source_type TEXT,
             source_id TEXT,
-            source_text TEXT,
-            subreddit TEXT,
-            confidence REAL,
+            source_type TEXT,
+            source_platform TEXT,
+            problem_summary TEXT,
+            category TEXT,
+            frustration_level REAL,
+            solvability_score REAL,
+            market_size_score REAL,
+            frequency_score REAL,
+            opportunity_score REAL,
+            app_idea TEXT,
             cross_platform_validated BOOLEAN DEFAULT 0,
-            cluster_id INTEGER,
-            created_at TEXT,
-            tags TEXT
+            created_at TEXT
         );
 
         CREATE TABLE IF NOT EXISTS clusters (
@@ -87,7 +101,6 @@ def init_db(db_path: str) -> None:
         CREATE INDEX IF NOT EXISTS idx_comments_post_id ON comments(post_id);
         CREATE INDEX IF NOT EXISTS idx_pain_points_category ON pain_points(category);
         CREATE INDEX IF NOT EXISTS idx_pain_points_source ON pain_points(source_platform, source_type);
-        CREATE INDEX IF NOT EXISTS idx_pain_points_cluster ON pain_points(cluster_id);
     """)
     conn.close()
 
@@ -169,10 +182,11 @@ def insert_tweet(db_path: str, tweet: Tweet) -> bool:
     conn = _get_connection(db_path)
     try:
         conn.execute(
-            "INSERT OR IGNORE INTO tweets (id, text, author, likes, retweets, replies, url, created_at, scraped_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO tweets (id, text, author, likes, retweets, replies, url, created_at, scraped_at, search_query) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (tweet.id, tweet.text, tweet.author, tweet.likes, tweet.retweets,
              tweet.replies, tweet.url, tweet.created_at,
-             tweet.scraped_at or datetime.now(timezone.utc).isoformat()),
+             tweet.scraped_at or datetime.now(timezone.utc).isoformat(),
+             tweet.search_query),
         )
         conn.commit()
         return conn.total_changes > 0
@@ -193,17 +207,22 @@ def get_tweets(db_path: str, limit: int = 100) -> list[Tweet]:
 
 # --- Pain Points ---
 
-def insert_pain_point(db_path: str, pp: PainPoint) -> int:
+def insert_pain_point(db_path: str, **kwargs) -> int:
     conn = _get_connection(db_path)
     try:
         cursor = conn.execute(
-            "INSERT INTO pain_points (description, category, severity, frequency, market_size, source_platform, source_type, source_id, source_text, subreddit, confidence, cross_platform_validated, cluster_id, created_at, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (pp.description, pp.category, pp.severity, pp.frequency,
-             pp.market_size, pp.source_platform, pp.source_type, pp.source_id,
-             pp.source_text, pp.subreddit, pp.confidence,
-             pp.cross_platform_validated, pp.cluster_id,
-             pp.created_at or datetime.now(timezone.utc).isoformat(),
-             ",".join(pp.tags)),
+            """INSERT INTO pain_points
+               (source_id, source_type, source_platform, problem_summary, category,
+                frustration_level, solvability_score, market_size_score,
+                frequency_score, opportunity_score, app_idea, cross_platform_validated, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (kwargs.get("source_id"), kwargs.get("source_type"), kwargs.get("source_platform"),
+             kwargs.get("problem_summary"), kwargs.get("category"),
+             kwargs.get("frustration_level"), kwargs.get("solvability_score"),
+             kwargs.get("market_size_score"), kwargs.get("frequency_score"),
+             kwargs.get("opportunity_score"), kwargs.get("app_idea"),
+             kwargs.get("cross_platform_validated", False),
+             kwargs.get("created_at") or datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
         return cursor.lastrowid
@@ -217,26 +236,20 @@ def get_pain_points(
     min_score: float = 0.0,
     validated_only: bool = False,
     limit: int = 100,
-) -> list[PainPoint]:
+) -> list[dict]:
     conn = _get_connection(db_path)
     try:
-        query = "SELECT * FROM pain_points WHERE severity >= ?"
+        query = "SELECT * FROM pain_points WHERE opportunity_score >= ?"
         params: list = [min_score]
         if category:
             query += " AND category = ?"
             params.append(category)
         if validated_only:
             query += " AND cross_platform_validated = 1"
-        query += " ORDER BY severity DESC LIMIT ?"
+        query += " ORDER BY opportunity_score DESC LIMIT ?"
         params.append(limit)
         rows = conn.execute(query, params).fetchall()
-        results = []
-        for r in rows:
-            d = dict(r)
-            d["cross_platform_validated"] = bool(d["cross_platform_validated"])
-            d["tags"] = d["tags"].split(",") if d["tags"] else []
-            results.append(PainPoint(**d))
-        return results
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 

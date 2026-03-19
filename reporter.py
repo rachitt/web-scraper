@@ -1,6 +1,5 @@
 """Reporting and output for pain point analysis results."""
 
-import argparse
 import csv
 import sys
 
@@ -52,7 +51,9 @@ def get_pain_points(
     """
     params.append(limit)
 
-    return [dict(r) for r in db.execute(query, params).fetchall()]
+    results = [dict(r) for r in db.execute(query, params).fetchall()]
+    db.close()
+    return results
 
 
 def print_table(pain_points: list[dict]) -> None:
@@ -123,7 +124,7 @@ def export_csv(pain_points: list[dict], output_path: str) -> None:
     print(f"Exported {len(pain_points)} pain points to {output_path}")
 
 
-def print_stats() -> None:
+def print_detailed_stats() -> None:
     """Print summary statistics across all data."""
     db = get_db()
 
@@ -131,7 +132,6 @@ def print_stats() -> None:
     print("PIPELINE STATS")
     print("=" * 60)
 
-    # Posts
     post_stats = db.execute(
         """SELECT
             COUNT(*) as total,
@@ -167,7 +167,6 @@ def print_stats() -> None:
     print("\nContent Pipeline:")
     print(tabulate(content_rows, headers=["Type", "Total", "Unprocessed", "Filtered", "Passed"], tablefmt="simple"))
 
-    # Pain points by platform
     platform_stats = db.execute(
         """SELECT source_platform, COUNT(*) as count,
                   SUM(CASE WHEN cross_platform_validated THEN 1 ELSE 0 END) as validated
@@ -179,7 +178,6 @@ def print_stats() -> None:
         plat_rows = [[r["source_platform"], r["count"], r["validated"]] for r in platform_stats]
         print(tabulate(plat_rows, headers=["Platform", "Count", "Validated"], tablefmt="simple"))
 
-    # Pain points by category
     category_stats = db.execute(
         """SELECT category, COUNT(*) as count,
                   ROUND(AVG(opportunity_score), 2) as avg_score
@@ -191,7 +189,6 @@ def print_stats() -> None:
         cat_rows = [[r["category"], r["count"], r["avg_score"]] for r in category_stats]
         print(tabulate(cat_rows, headers=["Category", "Count", "Avg Score"], tablefmt="simple"))
 
-    # By subreddit (Reddit only)
     sub_stats = db.execute(
         """SELECT p.subreddit, COUNT(*) as count
            FROM pain_points pp
@@ -206,45 +203,4 @@ def print_stats() -> None:
         print(tabulate(sub_rows, headers=["Subreddit", "Pain Points"], tablefmt="simple"))
 
     print()
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Pain point analysis reports")
-    subparsers = parser.add_subparsers(dest="command", help="Command to run")
-
-    # Report command
-    report_parser = subparsers.add_parser("report", help="Show pain point rankings")
-    report_parser.add_argument("--category", help="Filter by category")
-    report_parser.add_argument("--min-score", type=float, help="Minimum opportunity score")
-    report_parser.add_argument("--validated-only", action="store_true", help="Only cross-platform validated")
-    report_parser.add_argument("--platform", choices=["reddit", "x", "all"], default="all", help="Filter by platform")
-    report_parser.add_argument("--limit", type=int, default=50, help="Max results")
-    report_parser.add_argument("--csv", metavar="FILE", help="Export to CSV file")
-
-    # Stats command
-    subparsers.add_parser("stats", help="Show pipeline statistics")
-
-    args = parser.parse_args()
-
-    if args.command == "report":
-        results = get_pain_points(
-            category=args.category,
-            min_score=args.min_score,
-            validated_only=args.validated_only,
-            platform=args.platform,
-            limit=args.limit,
-        )
-        if args.csv:
-            export_csv(results, args.csv)
-        else:
-            print_table(results)
-
-    elif args.command == "stats":
-        print_stats()
-
-    else:
-        parser.print_help()
-
-
-if __name__ == "__main__":
-    main()
+    db.close()

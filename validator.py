@@ -17,7 +17,6 @@ def _extract_keywords(text: str, min_length: int = 4) -> set[str]:
     }
     words = set()
     for word in text.lower().split():
-        # Strip punctuation
         cleaned = "".join(c for c in word if c.isalnum())
         if len(cleaned) >= min_length and cleaned not in stop_words:
             words.add(cleaned)
@@ -33,7 +32,6 @@ def _text_similarity(text_a: str, text_b: str) -> float:
         return 0.0
 
     overlap = keywords_a & keywords_b
-    # Jaccard-like: overlap relative to the smaller set
     smaller = min(len(keywords_a), len(keywords_b))
     return len(overlap) / smaller if smaller > 0 else 0.0
 
@@ -43,7 +41,7 @@ def _get_reddit_content(db) -> list[dict]:
     rows = db.execute(
         """SELECT pp.id, pp.problem_summary, pp.source_id, pp.source_type,
                   CASE
-                      WHEN pp.source_type = 'post' THEN p.title || ' ' || COALESCE(p.body, '')
+                      WHEN pp.source_type = 'post' THEN p.title || ' ' || COALESCE(p.selftext, '')
                       WHEN pp.source_type = 'comment' THEN c.body
                   END as original_text
            FROM pain_points pp
@@ -58,7 +56,7 @@ def _get_x_content(db) -> list[dict]:
     """Get original content text for X-sourced pain points."""
     rows = db.execute(
         """SELECT pp.id, pp.problem_summary, pp.source_id, pp.source_type,
-                  t.body as original_text
+                  t.text as original_text
            FROM pain_points pp
            LEFT JOIN tweets t ON pp.source_id = t.id AND pp.source_type = 'tweet'
            WHERE pp.source_platform = 'x'"""
@@ -68,9 +66,9 @@ def _get_x_content(db) -> list[dict]:
 
 def _search_tweets_for_match(db, keywords: set[str], min_overlap: float) -> bool:
     """Search tweets table for content matching the given keywords."""
-    tweets = db.execute("SELECT body FROM tweets WHERE is_pain_point = 1").fetchall()
+    tweets = db.execute("SELECT text FROM tweets WHERE is_pain_point = 1").fetchall()
     for tweet in tweets:
-        tweet_keywords = _extract_keywords(tweet["body"] or "")
+        tweet_keywords = _extract_keywords(tweet["text"] or "")
         if not tweet_keywords:
             continue
         overlap = keywords & tweet_keywords
@@ -83,10 +81,10 @@ def _search_tweets_for_match(db, keywords: set[str], min_overlap: float) -> bool
 def _search_reddit_for_match(db, keywords: set[str], min_overlap: float) -> bool:
     """Search posts and comments tables for content matching keywords."""
     posts = db.execute(
-        "SELECT title, body FROM posts WHERE is_pain_point = 1"
+        "SELECT title, selftext FROM posts WHERE is_pain_point = 1"
     ).fetchall()
     for post in posts:
-        text = f"{post['title'] or ''} {post['body'] or ''}"
+        text = f"{post['title'] or ''} {post['selftext'] or ''}"
         post_keywords = _extract_keywords(text)
         if not post_keywords:
             continue
@@ -111,16 +109,11 @@ def _search_reddit_for_match(db, keywords: set[str], min_overlap: float) -> bool
 
 
 def validate_cross_platform(config: dict) -> dict:
-    """Validate pain points across platforms and boost scores.
-
-    For Reddit pain points: search X content for matches.
-    For X pain points: search Reddit content for matches.
-
-    Returns summary of validation results.
-    """
+    """Validate pain points across platforms and boost scores."""
     db = get_db()
-    boost = config.get("validation_boost", DEFAULT_VALIDATION_BOOST)
-    min_overlap = config.get("validation_min_overlap", MIN_KEYWORD_OVERLAP)
+    validation_cfg = config.get("validation", {})
+    boost = validation_cfg.get("cross_platform_score_boost", DEFAULT_VALIDATION_BOOST)
+    min_overlap = validation_cfg.get("min_overlap", MIN_KEYWORD_OVERLAP)
 
     reddit_items = _get_reddit_content(db)
     x_items = _get_x_content(db)
@@ -134,7 +127,6 @@ def validate_cross_platform(config: dict) -> dict:
         keywords = _extract_keywords(combined_text)
 
         if _search_tweets_for_match(db, keywords, min_overlap):
-            # Check current state
             current = db.execute(
                 "SELECT cross_platform_validated, opportunity_score FROM pain_points WHERE id = ?",
                 (item["id"],),
@@ -178,6 +170,7 @@ def validate_cross_platform(config: dict) -> dict:
             validated_count += 1
 
     db.commit()
+    db.close()
 
     return {
         "newly_validated": validated_count,
@@ -186,18 +179,3 @@ def validate_cross_platform(config: dict) -> dict:
         "x_checked": len(x_items),
         "boost_multiplier": boost,
     }
-
-
-if __name__ == "__main__":
-    import yaml
-
-    with open("config.yaml") as f:
-        config = yaml.safe_load(f)
-
-    result = validate_cross_platform(config)
-    print(f"Cross-platform validation complete:")
-    print(f"  Newly validated:    {result['newly_validated']}")
-    print(f"  Already validated:  {result['already_validated']}")
-    print(f"  Reddit items checked: {result['reddit_checked']}")
-    print(f"  X items checked:      {result['x_checked']}")
-    print(f"  Boost multiplier:     {result['boost_multiplier']}x")

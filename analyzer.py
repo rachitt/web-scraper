@@ -61,24 +61,9 @@ def _get_api_calls_today(db) -> int:
     return row["cnt"] if row else 0
 
 
-def _fetch_unanalyzed(db, source_type: str, table: str, limit: int) -> list[dict]:
-    """Fetch items that passed filter but haven't been analyzed yet."""
-    query = f"""
-        SELECT t.id, t.body, {'t.title,' if source_type == 'post' else ''}
-               {'t.score' if source_type != 'tweet' else 't.likes as score'}
-        FROM {table} t
-        LEFT JOIN pain_points pp ON pp.source_id = t.id
-            AND pp.source_type = ?
-        WHERE t.is_pain_point = 1
-            AND pp.id IS NULL
-        LIMIT ?
-    """
-    return db.execute(query, (source_type, limit)).fetchall()
-
-
 def _fetch_unanalyzed_posts(db, limit: int) -> list[dict]:
     rows = db.execute(
-        """SELECT p.id, p.title, p.body, p.score, p.subreddit
+        """SELECT p.id, p.title, p.selftext, p.score, p.subreddit
            FROM posts p
            LEFT JOIN pain_points pp ON pp.source_id = p.id AND pp.source_type = 'post'
            WHERE p.is_pain_point = 1 AND pp.id IS NULL
@@ -90,7 +75,7 @@ def _fetch_unanalyzed_posts(db, limit: int) -> list[dict]:
             "source_id": r["id"],
             "source_type": "post",
             "source_platform": "reddit",
-            "text": f"[r/{r['subreddit'] or '?'}] {r['title'] or ''}\n{r['body'] or ''}".strip(),
+            "text": f"[r/{r['subreddit'] or '?'}] {r['title'] or ''}\n{r['selftext'] or ''}".strip(),
             "score": r["score"],
         }
         for r in rows
@@ -99,7 +84,7 @@ def _fetch_unanalyzed_posts(db, limit: int) -> list[dict]:
 
 def _fetch_unanalyzed_comments(db, limit: int) -> list[dict]:
     rows = db.execute(
-        """SELECT c.id, c.body, c.score, p.title as post_title, p.body as post_body, p.subreddit
+        """SELECT c.id, c.body, c.score, p.title as post_title, p.selftext as post_body, p.subreddit
            FROM comments c
            LEFT JOIN posts p ON c.post_id = p.id
            LEFT JOIN pain_points pp ON pp.source_id = c.id AND pp.source_type = 'comment'
@@ -125,7 +110,7 @@ def _fetch_unanalyzed_comments(db, limit: int) -> list[dict]:
 
 def _fetch_unanalyzed_tweets(db, limit: int) -> list[dict]:
     rows = db.execute(
-        """SELECT t.id, t.body, t.likes, t.search_query
+        """SELECT t.id, t.text, t.likes, t.search_query
            FROM tweets t
            LEFT JOIN pain_points pp ON pp.source_id = t.id AND pp.source_type = 'tweet'
            WHERE t.is_pain_point = 1 AND pp.id IS NULL
@@ -139,7 +124,7 @@ def _fetch_unanalyzed_tweets(db, limit: int) -> list[dict]:
             "source_platform": "x",
             "text": (
                 f"[Found via search: {r['search_query'] or 'N/A'}]\n"
-                f"Tweet: {r['body'] or ''}"
+                f"Tweet: {r['text'] or ''}"
             ).strip(),
             "score": r["likes"],
         }
@@ -153,7 +138,6 @@ def _compute_frequency_score(db, problem_summary: str, source_platform: str) -> 
     if not keywords:
         return 1
 
-    # Search across pain_points for similar problems
     all_summaries = db.execute("SELECT problem_summary FROM pain_points").fetchall()
     similar_count = 0
     for row in all_summaries:
@@ -162,7 +146,6 @@ def _compute_frequency_score(db, problem_summary: str, source_platform: str) -> 
         if overlap >= len(keywords) * 0.3:
             similar_count += 1
 
-    # Map count to 1-10 scale
     if similar_count <= 1:
         return 1
     elif similar_count <= 3:
@@ -183,20 +166,10 @@ def _compute_opportunity_score(
 
 
 def analyze_batch(items: list[dict], config: dict, dry_run: bool = False) -> list[dict]:
-    """Send a batch of items to Claude for analysis.
-
-    Args:
-        items: list of dicts with source_id, source_type, source_platform, text, score
-        config: app config dict
-        dry_run: if True, just print what would be sent
-
-    Returns:
-        list of analysis result dicts
-    """
+    """Send a batch of items to Claude for analysis."""
     if not items:
         return []
 
-    # Build prompt
     items_text = ""
     for i, item in enumerate(items):
         items_text += f"\n--- Item {i} ({item['source_type']} from {item['source_platform']}) ---\n"
@@ -208,7 +181,7 @@ def analyze_batch(items: list[dict], config: dict, dry_run: bool = False) -> lis
     )
 
     input_tokens = _estimate_tokens(prompt)
-    output_tokens = len(items) * 100  # ~100 tokens per item response
+    output_tokens = len(items) * 100
     estimated_cost = _estimate_cost(input_tokens, output_tokens)
 
     if dry_run:
@@ -230,7 +203,6 @@ def analyze_batch(items: list[dict], config: dict, dry_run: bool = False) -> lis
     )
 
     response_text = response.content[0].text
-    # Parse JSON from response, handling potential markdown fencing
     response_text = response_text.strip()
     if response_text.startswith("```"):
         response_text = response_text.split("\n", 1)[1]
@@ -241,19 +213,18 @@ def analyze_batch(items: list[dict], config: dict, dry_run: bool = False) -> lis
 
 
 def run_analysis(config: dict, dry_run: bool = False) -> dict:
-    """Run full analysis pipeline on all unanalyzed items.
-
-    Returns summary of what was analyzed.
-    """
+    """Run full analysis pipeline on all unanalyzed items."""
     db = get_db()
-    daily_cap = config.get("daily_api_cap", 50)
-    batch_size = config.get("batch_size", BATCH_SIZE)
+    claude_cfg = config.get("claude", {})
+    daily_cap = claude_cfg.get("daily_call_cap", 50)
+    batch_size = claude_cfg.get("batch_size", BATCH_SIZE)
 
     calls_today = _get_api_calls_today(db)
     remaining_budget = max(0, daily_cap - calls_today)
 
     if remaining_budget == 0 and not dry_run:
         print(f"Daily API cap reached ({daily_cap} calls). Skipping analysis.")
+        db.close()
         return {"analyzed": 0, "skipped_cap": True}
 
     # Gather all unanalyzed items
@@ -264,15 +235,13 @@ def run_analysis(config: dict, dry_run: bool = False) -> dict:
 
     if not all_items:
         print("No unanalyzed items found.")
+        db.close()
         return {"analyzed": 0, "skipped_cap": False}
 
-    # Limit to budget
     all_items = all_items[:remaining_budget]
 
     total_analyzed = 0
-    total_cost = 0.0
 
-    # Process in batches
     for batch_start in range(0, len(all_items), batch_size):
         batch = all_items[batch_start : batch_start + batch_size]
         results = analyze_batch(batch, config, dry_run=dry_run)
@@ -280,7 +249,6 @@ def run_analysis(config: dict, dry_run: bool = False) -> dict:
         if dry_run:
             continue
 
-        # Store results
         for result in results:
             idx = result.get("item_index", 0)
             if idx >= len(batch):
@@ -289,7 +257,6 @@ def run_analysis(config: dict, dry_run: bool = False) -> dict:
             item = batch[idx]
 
             if not result.get("is_valid_pain_point", True):
-                # Mark as not a pain point so we don't re-process
                 table = (
                     "posts"
                     if item["source_type"] == "post"
@@ -337,30 +304,10 @@ def run_analysis(config: dict, dry_run: bool = False) -> dict:
 
         db.commit()
 
-    summary = {
+    db.close()
+    return {
         "analyzed": total_analyzed,
         "total_items": len(all_items),
         "skipped_cap": False,
         "dry_run": dry_run,
     }
-    return summary
-
-
-if __name__ == "__main__":
-    import argparse
-
-    import yaml
-
-    parser = argparse.ArgumentParser(description="Analyze filtered content with Claude")
-    parser.add_argument("--dry-run", action="store_true", help="Show what would be sent without calling API")
-    args = parser.parse_args()
-
-    with open("config.yaml") as f:
-        config = yaml.safe_load(f)
-
-    result = run_analysis(config, dry_run=args.dry_run)
-
-    if args.dry_run:
-        print(f"\n[DRY RUN] Total items that would be analyzed: {result['total_items']}")
-    else:
-        print(f"Analyzed {result['analyzed']} items out of {result['total_items']} queued.")
