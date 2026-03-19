@@ -21,11 +21,13 @@ IMPORT_PATH = "data/analyze_results.json"
 
 
 def _fetch_unanalyzed_posts(db, limit: int) -> list[dict]:
+    """Fetch posts sorted by engagement (score * comments)."""
     rows = db.execute(
         """SELECT p.id, p.title, p.selftext, p.score, p.subreddit, p.num_comments
            FROM posts p
            LEFT JOIN pain_points pp ON pp.source_id = p.id AND pp.source_type = 'post'
            WHERE p.is_pain_point = 1 AND pp.id IS NULL
+           ORDER BY p.score * p.num_comments DESC
            LIMIT ?""",
         (limit,),
     ).fetchall()
@@ -38,19 +40,21 @@ def _fetch_unanalyzed_posts(db, limit: int) -> list[dict]:
             "subreddit": r["subreddit"],
             "text": f"[r/{r['subreddit'] or '?'}] {r['title'] or ''}\n{r['selftext'] or ''}".strip(),
             "score": r["score"],
-            "num_comments": r["num_comments"],
+            "engagement": r["score"] * (r["num_comments"] or 1),
         }
         for r in rows
     ]
 
 
 def _fetch_unanalyzed_comments(db, limit: int) -> list[dict]:
+    """Fetch comments sorted by score (highest upvoted = strongest signal)."""
     rows = db.execute(
         """SELECT c.id, c.body, c.score, p.title as post_title, p.selftext as post_body, p.subreddit
            FROM comments c
            LEFT JOIN posts p ON c.post_id = p.id
            LEFT JOIN pain_points pp ON pp.source_id = c.id AND pp.source_type = 'comment'
            WHERE c.is_pain_point = 1 AND pp.id IS NULL
+           ORDER BY c.score DESC
            LIMIT ?""",
         (limit,),
     ).fetchall()
@@ -67,21 +71,26 @@ def _fetch_unanalyzed_comments(db, limit: int) -> list[dict]:
                 f"Comment: {r['body'] or ''}"
             ).strip(),
             "score": r["score"],
+            "engagement": r["score"],
         }
         for r in rows
     ]
 
 
 def export_for_analysis(config: dict, output_path: str | None = None) -> dict:
-    """Export all unanalyzed filtered items to JSON for Claude Code to analyze."""
+    """Export unanalyzed items sorted by engagement for Claude Code to analyze."""
     db = get_db()
-    limit = config.get("analysis", {}).get("batch_size", 50)
+    limit = config.get("analysis", {}).get("batch_size", 100)
     output_path = output_path or EXPORT_PATH
 
-    all_items = []
-    all_items.extend(_fetch_unanalyzed_posts(db, limit))
-    all_items.extend(_fetch_unanalyzed_comments(db, limit - len(all_items)))
+    # Fetch both, then merge and sort by engagement
+    posts = _fetch_unanalyzed_posts(db, limit)
+    comments = _fetch_unanalyzed_comments(db, limit)
     db.close()
+
+    all_items = posts + comments
+    all_items.sort(key=lambda x: x.get("engagement", 0), reverse=True)
+    all_items = all_items[:limit]
 
     if not all_items:
         print("No unanalyzed items found.")

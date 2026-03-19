@@ -1,5 +1,6 @@
 """Pre-filter posts and comments for pain points before LLM analysis."""
 
+import re
 from db import get_db
 
 DEFAULT_PAIN_KEYWORDS = [
@@ -15,11 +16,9 @@ DEFAULT_PAIN_KEYWORDS = [
     "there has to be a better way",
     "sick of",
     "fed up",
-    "annoying",
     "pain point",
     "deal breaker",
     "waste of time",
-    "broken",
     "unusable",
     "terrible experience",
     "nightmare",
@@ -31,9 +30,33 @@ DEFAULT_PAIN_KEYWORDS = [
     "shut up and take my money",
     "is there an app",
     "any tool that",
-    "how do you deal with",
     "am i the only one",
+    "how do you deal with",
+    "there's got to be",
+    "i can't find",
+    "nothing works",
+    "every time i try",
+    "so expensive",
+    "rip off",
+    "overpriced",
+    "no alternative",
+    "why is it so hard",
 ]
+
+# Title patterns to skip (promotion threads, weekly megathreads, etc.)
+BLACKLIST_PATTERNS = [
+    r"(?i)promote your business",
+    r"(?i)marketplace\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)",
+    r"(?i)weekly\s+(self[- ]?promotion|promo|thread|discussion)",
+    r"(?i)share your (startup|project|business)",
+    r"(?i)feedback friday",
+    r"(?i)quick questions",
+]
+
+
+def _is_blacklisted(title: str) -> bool:
+    """Check if a post title matches a blacklisted pattern."""
+    return any(re.search(pat, title) for pat in BLACKLIST_PATTERNS)
 
 
 def _count_keyword_matches(text: str, keywords: list[str]) -> int:
@@ -43,14 +66,23 @@ def _count_keyword_matches(text: str, keywords: list[str]) -> int:
 
 
 def filter_posts(config: dict) -> dict:
-    """Filter posts by keyword matches and engagement thresholds."""
+    """Filter posts by keyword matches and engagement thresholds.
+
+    Posts pass if:
+    - Not from a blacklisted thread
+    - At least 1 pain keyword match
+    - Score >= 5 AND comments >= 3
+    OR
+    - High engagement (score >= 20) even with 0 keyword matches (the post itself IS the complaint)
+    """
     db = get_db()
     filter_cfg = config.get("filter", {})
     keywords = filter_cfg.get("pain_keywords", DEFAULT_PAIN_KEYWORDS)
     thresholds = filter_cfg.get("thresholds", {})
     keyword_threshold = thresholds.get("posts", 1)
-    post_min_score = config.get("post_min_score", 5)
-    post_min_comments = config.get("post_min_comments", 3)
+    post_min_score = filter_cfg.get("post_min_score", 5)
+    post_min_comments = filter_cfg.get("post_min_comments", 3)
+    post_high_engagement = filter_cfg.get("post_high_engagement", 20)
 
     posts = db.execute(
         "SELECT id, title, selftext, score, num_comments FROM posts WHERE is_pain_point IS NULL"
@@ -60,12 +92,25 @@ def filter_posts(config: dict) -> dict:
     failed = 0
 
     for post in posts:
-        text = f"{post['title'] or ''} {post['selftext'] or ''}"
-        matches = _count_keyword_matches(text, keywords)
-        score_ok = (post["score"] or 0) >= post_min_score
-        comments_ok = (post["num_comments"] or 0) >= post_min_comments
+        title = post["title"] or ""
 
-        if matches >= keyword_threshold and score_ok and comments_ok:
+        # Skip promotion/megathreads
+        if _is_blacklisted(title):
+            db.execute("UPDATE posts SET is_pain_point = 0 WHERE id = ?", (post["id"],))
+            failed += 1
+            continue
+
+        text = f"{title} {post['selftext'] or ''}"
+        matches = _count_keyword_matches(text, keywords)
+        score = post["score"] or 0
+        comments = post["num_comments"] or 0
+
+        # Pass: keyword match + decent engagement
+        keyword_pass = matches >= keyword_threshold and score >= post_min_score and comments >= post_min_comments
+        # Pass: high engagement even without keywords (the post IS the complaint)
+        engagement_pass = score >= post_high_engagement and comments >= post_min_comments
+
+        if keyword_pass or engagement_pass:
             db.execute("UPDATE posts SET is_pain_point = 1 WHERE id = ?", (post["id"],))
             passed += 1
         else:
@@ -78,22 +123,37 @@ def filter_posts(config: dict) -> dict:
 
 
 def filter_comments(config: dict) -> dict:
-    """Filter comments by keyword matches and engagement thresholds."""
+    """Filter comments by keyword matches and engagement.
+
+    Comments from blacklisted parent posts are skipped.
+    Minimum score raised to 10 to filter noise.
+    """
     db = get_db()
     filter_cfg = config.get("filter", {})
     keywords = filter_cfg.get("pain_keywords", DEFAULT_PAIN_KEYWORDS)
     thresholds = filter_cfg.get("thresholds", {})
     keyword_threshold = thresholds.get("comments", 1)
-    comment_min_score = config.get("comment_min_score", 2)
+    comment_min_score = filter_cfg.get("comment_min_score", 10)
 
     comments = db.execute(
-        "SELECT id, body, score FROM comments WHERE is_pain_point IS NULL"
+        """SELECT c.id, c.body, c.score, p.title as post_title
+           FROM comments c
+           LEFT JOIN posts p ON c.post_id = p.id
+           WHERE c.is_pain_point IS NULL"""
     ).fetchall()
 
     passed = 0
     failed = 0
 
     for comment in comments:
+        post_title = comment["post_title"] or ""
+
+        # Skip comments from blacklisted threads
+        if _is_blacklisted(post_title):
+            db.execute("UPDATE comments SET is_pain_point = 0 WHERE id = ?", (comment["id"],))
+            failed += 1
+            continue
+
         text = comment["body"] or ""
         matches = _count_keyword_matches(text, keywords)
         score_ok = (comment["score"] or 0) >= comment_min_score

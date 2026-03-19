@@ -7,43 +7,65 @@ reddit:
     - freelance
     - productivity
     - webdev
-  sort: hot            # hot, new, top
-  time_filter: week    # hour, day, week, month, year, all (only for top)
-  limit: 50            # posts per subreddit
+  sort: hot
+  time_filter: week
+  limit: 50
   comments:
     enabled: true
     max_depth: 10
+  client_id: ${REDDIT_CLIENT_ID}
+  client_secret: ${REDDIT_CLIENT_SECRET}
+  user_agent: "pain-point-scraper/1.0"
 
 analysis:
-  batch_size: 50
-  export_path: data/analyze_input.json
-  import_path: data/analyze_results.json
+  batch_size: 100
 
 filter:
   pain_keywords:
     - frustrated
-    - struggling
-    - pain point
+    - frustrating
     - wish there was
-    - looking for
-    - need a tool
-    - hate using
+    - why can't
+    - why isn't there
+    - hate when
+    - struggling with
+    - so tired of
+    - drives me crazy
+    - there has to be a better way
+    - sick of
+    - fed up
+    - pain point
+    - deal breaker
     - waste of time
-    - broken
-    - annoying
-    - difficult
-    - impossible
-    - expensive
+    - unusable
+    - terrible experience
+    - nightmare
+    - impossible to
+    - no good way to
+    - can't believe there's no
+    - someone needs to build
+    - would pay for
+    - shut up and take my money
+    - is there an app
+    - any tool that
+    - am i the only one
+    - how do you deal with
+    - there's got to be
+    - i can't find
+    - nothing works
+    - every time i try
+    - so expensive
+    - rip off
     - overpriced
-    - clunky
-    - slow
-    - buggy
-    - manual process
-    - time consuming
-    - no good solution
+    - no alternative
+    - why is it so hard
   thresholds:
-    posts: 2
-    comments: 1
+    posts: 1          # keyword matches needed for posts
+    comments: 1       # keyword matches needed for comments
+  post_min_score: 5
+  post_min_comments: 3
+  post_high_engagement: 20   # high-engagement posts pass even with 0 keyword matches
+  comment_min_score: 10      # only comments with 10+ upvotes
 
 storage:
   db_path: data/scraper.db
