@@ -1,5 +1,4 @@
 praw
-anthropic
 pyyaml
 tabulate
 httpx

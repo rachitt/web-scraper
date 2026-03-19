@@ -31,11 +31,10 @@ x:
   username: ${X_USERNAME}
   password: ${X_PASSWORD}
 
-claude:
-  model: claude-sonnet-4-20250514
-  batch_size: 20
-  daily_call_cap: 500
-  api_key: ${ANTHROPIC_API_KEY}
+analysis:
+  batch_size: 50        # max items per export
+  export_path: data/analyze_input.json
+  import_path: data/analyze_results.json
 
 filter:
   pain_keywords:

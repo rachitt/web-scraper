@@ -132,13 +132,14 @@ def cmd_filter(args, config):
 def cmd_analyze(args, config):
     db_path = config["storage"]["db_path"]
     db.init_db(db_path)
-    result = analyzer.run_analysis(config, dry_run=args.dry_run)
-    if args.dry_run:
-        print(f"\n[DRY RUN] Total items that would be analyzed: {result.get('total_items', 0)}")
-    elif result.get("skipped_cap"):
-        print("Daily API cap reached.")
+    if args.import_file:
+        result = analyzer.import_results(config, args.import_file)
     else:
-        print(f"Analyzed {result['analyzed']} items out of {result.get('total_items', 0)} queued.")
+        result = analyzer.export_for_analysis(config, args.output)
+        if result["exported"] > 0:
+            print(f"\nNow have Claude Code read {result['path']} and analyze the items.")
+            print(f"Save results to data/analyze_results.json, then run:")
+            print(f"  python3 cli.py analyze --import data/analyze_results.json")
 
 
 def cmd_validate(args, config):
@@ -167,15 +168,18 @@ def cmd_pipeline(args, config):
     results = pain_filter.run_all_filters(config)
     print(f"Passed: {results['summary']['total_passed']} / {results['summary']['total_processed']} ({results['summary']['filter_rate_pct']}% filtered)")
 
-    print("\n=== Step 4: Analyze ===")
-    result = analyzer.run_analysis(config)
-    print(f"Analyzed: {result['analyzed']} items")
-
-    print("\n=== Step 5: Validate ===")
-    result = validator.validate_cross_platform(config)
-    print(f"Validated: {result['newly_validated']} pain points across platforms")
-
-    print("\nPipeline complete.")
+    print("\n=== Step 4: Export for Analysis ===")
+    result = analyzer.export_for_analysis(config)
+    if result["exported"] > 0:
+        print(f"\nPipeline paused. Have Claude Code analyze {result['path']}, then run:")
+        print(f"  python3 cli.py analyze --import data/analyze_results.json")
+        print(f"  python3 cli.py validate")
+        print(f"  python3 cli.py report")
+    else:
+        print("\n=== Step 5: Validate ===")
+        result = validator.validate_cross_platform(config)
+        print(f"Validated: {result['newly_validated']} pain points across platforms")
+        print("\nPipeline complete.")
 
 
 def cmd_report(args, config):
@@ -221,8 +225,9 @@ def main():
     subparsers.add_parser("filter", help="Filter scraped content for pain points")
 
     # analyze
-    p_analyze = subparsers.add_parser("analyze", help="Analyze with Claude")
-    p_analyze.add_argument("--dry-run", action="store_true", help="Preview without API calls")
+    p_analyze = subparsers.add_parser("analyze", help="Export items for Claude Code analysis / import results")
+    p_analyze.add_argument("--output", "-o", metavar="FILE", help="Export path (default: data/analyze_input.json)")
+    p_analyze.add_argument("--import", dest="import_file", metavar="FILE", help="Import results JSON from Claude Code")
 
     # validate
     subparsers.add_parser("validate", help="Cross-platform validation")
