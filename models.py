@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 
@@ -40,25 +40,6 @@ class Comment:
 
 
 @dataclass
-class Tweet:
-    id: str
-    text: str
-    author: str
-    likes: int
-    retweets: int
-    replies: int
-    url: str
-    created_at: str
-    scraped_at: Optional[str] = None
-    search_query: Optional[str] = None
-    is_pain_point: Optional[int] = None
-
-    @property
-    def full_text(self) -> str:
-        return self.text
-
-
-@dataclass
 class PainPoint:
     id: Optional[int] = None
     source_id: str = ""
@@ -72,5 +53,4 @@ class PainPoint:
     frequency_score: float = 0.0
     opportunity_score: float = 0.0
     app_idea: str = ""
-    cross_platform_validated: bool = False
     created_at: Optional[str] = None

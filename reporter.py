@@ -1,7 +1,6 @@
 """Reporting and output for pain point analysis results."""
 
 import csv
-import sys
 
 from tabulate import tabulate
 
@@ -29,19 +28,11 @@ def get_pain_points(
         conditions.append("pp.opportunity_score >= ?")
         params.append(min_score)
 
-    if validated_only:
-        conditions.append("pp.cross_platform_validated = 1")
-
-    if platform == "reddit":
-        conditions.append("pp.source_platform = 'reddit'")
-    elif platform == "x":
-        conditions.append("pp.source_platform = 'x'")
-
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
     query = f"""
         SELECT pp.id, pp.opportunity_score, pp.problem_summary, pp.category,
-               pp.source_platform, pp.source_type, pp.cross_platform_validated,
+               pp.source_platform, pp.source_type,
                pp.app_idea, pp.frustration_level, pp.solvability_score,
                pp.market_size_score, pp.frequency_score
         FROM pain_points pp
@@ -62,7 +53,7 @@ def print_table(pain_points: list[dict]) -> None:
         print("No pain points found matching filters.")
         return
 
-    headers = ["#", "Score", "Problem", "Category", "Platform", "Valid", "App Idea"]
+    headers = ["#", "Score", "Problem", "Category", "Type", "App Idea"]
     rows = []
 
     for i, pp in enumerate(pain_points, 1):
@@ -74,16 +65,12 @@ def print_table(pain_points: list[dict]) -> None:
         if len(idea) > 45:
             idea = idea[:42] + "..."
 
-        validated = "Y" if pp["cross_platform_validated"] else ""
-        platform = pp["source_platform"]
-
         rows.append([
             i,
             pp["opportunity_score"],
             summary,
             pp["category"],
-            platform,
-            validated,
+            pp["source_type"],
             idea,
         ])
 
@@ -102,9 +89,7 @@ def export_csv(pain_points: list[dict], output_path: str) -> None:
         "opportunity_score",
         "problem_summary",
         "category",
-        "source_platform",
         "source_type",
-        "cross_platform_validated",
         "frustration_level",
         "solvability_score",
         "market_size_score",
@@ -118,7 +103,6 @@ def export_csv(pain_points: list[dict], output_path: str) -> None:
         for i, pp in enumerate(pain_points, 1):
             row = {k: pp.get(k, "") for k in fieldnames}
             row["rank"] = i
-            row["cross_platform_validated"] = "yes" if pp["cross_platform_validated"] else "no"
             writer.writerow(row)
 
     print(f"Exported {len(pain_points)} pain points to {output_path}")
@@ -150,33 +134,12 @@ def print_detailed_stats() -> None:
            FROM comments"""
     ).fetchone()
 
-    tweet_stats = db.execute(
-        """SELECT
-            COUNT(*) as total,
-            SUM(CASE WHEN is_pain_point IS NULL THEN 1 ELSE 0 END) as unprocessed,
-            SUM(CASE WHEN is_pain_point = 0 THEN 1 ELSE 0 END) as filtered,
-            SUM(CASE WHEN is_pain_point = 1 THEN 1 ELSE 0 END) as passed
-           FROM tweets"""
-    ).fetchone()
-
     content_rows = [
         ["Posts", post_stats["total"], post_stats["unprocessed"], post_stats["filtered"], post_stats["passed"]],
         ["Comments", comment_stats["total"], comment_stats["unprocessed"], comment_stats["filtered"], comment_stats["passed"]],
-        ["Tweets", tweet_stats["total"], tweet_stats["unprocessed"], tweet_stats["filtered"], tweet_stats["passed"]],
     ]
     print("\nContent Pipeline:")
     print(tabulate(content_rows, headers=["Type", "Total", "Unprocessed", "Filtered", "Passed"], tablefmt="simple"))
-
-    platform_stats = db.execute(
-        """SELECT source_platform, COUNT(*) as count,
-                  SUM(CASE WHEN cross_platform_validated THEN 1 ELSE 0 END) as validated
-           FROM pain_points GROUP BY source_platform"""
-    ).fetchall()
-
-    if platform_stats:
-        print("\nPain Points by Platform:")
-        plat_rows = [[r["source_platform"], r["count"], r["validated"]] for r in platform_stats]
-        print(tabulate(plat_rows, headers=["Platform", "Count", "Validated"], tablefmt="simple"))
 
     category_stats = db.execute(
         """SELECT category, COUNT(*) as count,
@@ -193,7 +156,6 @@ def print_detailed_stats() -> None:
         """SELECT p.subreddit, COUNT(*) as count
            FROM pain_points pp
            JOIN posts p ON pp.source_id = p.id AND pp.source_type = 'post'
-           WHERE pp.source_platform = 'reddit'
            GROUP BY p.subreddit ORDER BY count DESC LIMIT 10"""
     ).fetchall()
 

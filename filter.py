@@ -1,6 +1,5 @@
-"""Pre-filter posts, comments, and tweets for pain points before LLM analysis."""
+"""Pre-filter posts and comments for pain points before LLM analysis."""
 
-import re
 from db import get_db
 
 DEFAULT_PAIN_KEYWORDS = [
@@ -111,45 +110,11 @@ def filter_comments(config: dict) -> dict:
     return {"passed": passed, "failed": failed, "total": passed + failed}
 
 
-def filter_tweets(config: dict) -> dict:
-    """Filter tweets by keyword matches and engagement thresholds."""
-    db = get_db()
-    filter_cfg = config.get("filter", {})
-    keywords = filter_cfg.get("pain_keywords", DEFAULT_PAIN_KEYWORDS)
-    thresholds = filter_cfg.get("thresholds", {})
-    keyword_threshold = thresholds.get("tweets", 1)
-    tweet_min_likes = config.get("tweet_min_likes", 3)
-
-    tweets = db.execute(
-        "SELECT id, text, likes FROM tweets WHERE is_pain_point IS NULL"
-    ).fetchall()
-
-    passed = 0
-    failed = 0
-
-    for tweet in tweets:
-        text = tweet["text"] or ""
-        matches = _count_keyword_matches(text, keywords)
-        likes_ok = (tweet["likes"] or 0) >= tweet_min_likes
-
-        if matches >= keyword_threshold and likes_ok:
-            db.execute("UPDATE tweets SET is_pain_point = 1 WHERE id = ?", (tweet["id"],))
-            passed += 1
-        else:
-            db.execute("UPDATE tweets SET is_pain_point = 0 WHERE id = ?", (tweet["id"],))
-            failed += 1
-
-    db.commit()
-    db.close()
-    return {"passed": passed, "failed": failed, "total": passed + failed}
-
-
 def run_all_filters(config: dict) -> dict:
     """Run filters on all content types. Returns combined results."""
     results = {
         "posts": filter_posts(config),
         "comments": filter_comments(config),
-        "tweets": filter_tweets(config),
     }
     total_passed = sum(r["passed"] for r in results.values())
     total = sum(r["total"] for r in results.values())

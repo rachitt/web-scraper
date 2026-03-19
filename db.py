@@ -3,7 +3,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
 
-from models import Comment, PainPoint, Post, Tweet
+from models import Comment, Post
 
 _default_db_path: str | None = None
 
@@ -58,20 +58,6 @@ def init_db(db_path: str) -> None:
             FOREIGN KEY (post_id) REFERENCES posts(id)
         );
 
-        CREATE TABLE IF NOT EXISTS tweets (
-            id TEXT PRIMARY KEY,
-            text TEXT,
-            author TEXT,
-            likes INTEGER,
-            retweets INTEGER,
-            replies INTEGER,
-            url TEXT,
-            created_at TEXT,
-            scraped_at TEXT,
-            search_query TEXT,
-            is_pain_point INTEGER
-        );
-
         CREATE TABLE IF NOT EXISTS pain_points (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source_id TEXT,
@@ -85,16 +71,6 @@ def init_db(db_path: str) -> None:
             frequency_score REAL,
             opportunity_score REAL,
             app_idea TEXT,
-            cross_platform_validated BOOLEAN DEFAULT 0,
-            created_at TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS clusters (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT,
-            description TEXT,
-            pain_point_count INTEGER DEFAULT 0,
-            avg_severity REAL,
             created_at TEXT
         );
 
@@ -176,59 +152,7 @@ def get_comments(db_path: str, post_id: str) -> list[Comment]:
         conn.close()
 
 
-# --- Tweets ---
-
-def insert_tweet(db_path: str, tweet: Tweet) -> bool:
-    conn = _get_connection(db_path)
-    try:
-        conn.execute(
-            "INSERT OR IGNORE INTO tweets (id, text, author, likes, retweets, replies, url, created_at, scraped_at, search_query) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (tweet.id, tweet.text, tweet.author, tweet.likes, tweet.retweets,
-             tweet.replies, tweet.url, tweet.created_at,
-             tweet.scraped_at or datetime.now(timezone.utc).isoformat(),
-             tweet.search_query),
-        )
-        conn.commit()
-        return conn.total_changes > 0
-    finally:
-        conn.close()
-
-
-def get_tweets(db_path: str, limit: int = 100) -> list[Tweet]:
-    conn = _get_connection(db_path)
-    try:
-        rows = conn.execute(
-            "SELECT * FROM tweets ORDER BY created_at DESC LIMIT ?", (limit,)
-        ).fetchall()
-        return [Tweet(**dict(r)) for r in rows]
-    finally:
-        conn.close()
-
-
 # --- Pain Points ---
-
-def insert_pain_point(db_path: str, **kwargs) -> int:
-    conn = _get_connection(db_path)
-    try:
-        cursor = conn.execute(
-            """INSERT INTO pain_points
-               (source_id, source_type, source_platform, problem_summary, category,
-                frustration_level, solvability_score, market_size_score,
-                frequency_score, opportunity_score, app_idea, cross_platform_validated, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (kwargs.get("source_id"), kwargs.get("source_type"), kwargs.get("source_platform"),
-             kwargs.get("problem_summary"), kwargs.get("category"),
-             kwargs.get("frustration_level"), kwargs.get("solvability_score"),
-             kwargs.get("market_size_score"), kwargs.get("frequency_score"),
-             kwargs.get("opportunity_score"), kwargs.get("app_idea"),
-             kwargs.get("cross_platform_validated", False),
-             kwargs.get("created_at") or datetime.now(timezone.utc).isoformat()),
-        )
-        conn.commit()
-        return cursor.lastrowid
-    finally:
-        conn.close()
-
 
 def get_pain_points(
     db_path: str,
@@ -244,36 +168,10 @@ def get_pain_points(
         if category:
             query += " AND category = ?"
             params.append(category)
-        if validated_only:
-            query += " AND cross_platform_validated = 1"
         query += " ORDER BY opportunity_score DESC LIMIT ?"
         params.append(limit)
         rows = conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
-    finally:
-        conn.close()
-
-
-def update_pain_point_cluster(db_path: str, pain_point_id: int, cluster_id: int) -> None:
-    conn = _get_connection(db_path)
-    try:
-        conn.execute(
-            "UPDATE pain_points SET cluster_id = ? WHERE id = ?",
-            (cluster_id, pain_point_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def update_pain_point_validated(db_path: str, pain_point_id: int, validated: bool) -> None:
-    conn = _get_connection(db_path)
-    try:
-        conn.execute(
-            "UPDATE pain_points SET cross_platform_validated = ? WHERE id = ?",
-            (validated, pain_point_id),
-        )
-        conn.commit()
     finally:
         conn.close()
 
@@ -285,18 +183,12 @@ def get_stats(db_path: str) -> dict:
     try:
         posts = conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0]
         comments = conn.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
-        tweets = conn.execute("SELECT COUNT(*) FROM tweets").fetchone()[0]
         pain_points = conn.execute("SELECT COUNT(*) FROM pain_points").fetchone()[0]
-        validated = conn.execute(
-            "SELECT COUNT(*) FROM pain_points WHERE cross_platform_validated = 1"
-        ).fetchone()[0]
         subreddits = conn.execute("SELECT DISTINCT subreddit FROM posts").fetchall()
         return {
             "posts": posts,
             "comments": comments,
-            "tweets": tweets,
             "pain_points": pain_points,
-            "validated_pain_points": validated,
             "subreddits": [r[0] for r in subreddits],
         }
     finally:

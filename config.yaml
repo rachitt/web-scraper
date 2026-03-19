@@ -11,28 +11,11 @@ reddit:
   time_filter: week    # hour, day, week, month, year, all (only for top)
   limit: 50            # posts per subreddit
   comments:
-    replace_more_limit: 0   # 0 = fetch all comment threads
-    max_depth: 10            # max comment nesting depth to store
-  client_id: ${REDDIT_CLIENT_ID}
-  client_secret: ${REDDIT_CLIENT_SECRET}
-  user_agent: "pain-point-scraper/1.0"
-
-x:
-  search_queries:
-    - "struggling with SaaS"
-    - "need a tool for"
-    - "wish there was an app"
-    - "so frustrated with"
-    - "looking for alternative to"
-  max_results: 100
-  delay_seconds: 2
-  graphql_query_ids:
-    search: "nK1dw4oTwikh2vzjRXPBTA"
-  username: ${X_USERNAME}
-  password: ${X_PASSWORD}
+    enabled: true
+    max_depth: 10
 
 analysis:
-  batch_size: 50        # max items per export
+  batch_size: 50
   export_path: data/analyze_input.json
   import_path: data/analyze_results.json
 
@@ -59,12 +42,8 @@ filter:
     - time consuming
     - no good solution
   thresholds:
-    posts: 2        # min keyword matches for posts
-    comments: 1     # min keyword matches for comments
-    tweets: 1       # min keyword matches for tweets
-
-validation:
-  cross_platform_score_boost: 1.5
+    posts: 2
+    comments: 1
 
 storage:
   db_path: data/scraper.db

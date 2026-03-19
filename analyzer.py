@@ -31,7 +31,7 @@ def _fetch_unanalyzed_posts(db, limit: int) -> list[dict]:
     ).fetchall()
     return [
         {
-            "item_index": None,  # filled later
+            "item_index": None,
             "source_id": r["id"],
             "source_type": "post",
             "source_platform": "reddit",
@@ -72,51 +72,21 @@ def _fetch_unanalyzed_comments(db, limit: int) -> list[dict]:
     ]
 
 
-def _fetch_unanalyzed_tweets(db, limit: int) -> list[dict]:
-    rows = db.execute(
-        """SELECT t.id, t.text, t.likes, t.search_query
-           FROM tweets t
-           LEFT JOIN pain_points pp ON pp.source_id = t.id AND pp.source_type = 'tweet'
-           WHERE t.is_pain_point = 1 AND pp.id IS NULL
-           LIMIT ?""",
-        (limit,),
-    ).fetchall()
-    return [
-        {
-            "item_index": None,
-            "source_id": r["id"],
-            "source_type": "tweet",
-            "source_platform": "x",
-            "text": (
-                f"[Found via search: {r['search_query'] or 'N/A'}]\n"
-                f"Tweet: {r['text'] or ''}"
-            ).strip(),
-            "score": r["likes"],
-        }
-        for r in rows
-    ]
-
-
 def export_for_analysis(config: dict, output_path: str | None = None) -> dict:
-    """Export all unanalyzed filtered items to JSON for Claude Code to analyze.
-
-    Returns summary of what was exported.
-    """
+    """Export all unanalyzed filtered items to JSON for Claude Code to analyze."""
     db = get_db()
-    limit = config.get("claude", {}).get("batch_size", 50)
+    limit = config.get("analysis", {}).get("batch_size", 50)
     output_path = output_path or EXPORT_PATH
 
     all_items = []
     all_items.extend(_fetch_unanalyzed_posts(db, limit))
     all_items.extend(_fetch_unanalyzed_comments(db, limit - len(all_items)))
-    all_items.extend(_fetch_unanalyzed_tweets(db, limit - len(all_items)))
     db.close()
 
     if not all_items:
         print("No unanalyzed items found.")
         return {"exported": 0, "path": output_path}
 
-    # Assign indices
     for i, item in enumerate(all_items):
         item["item_index"] = i
 
@@ -177,26 +147,17 @@ def _compute_opportunity_score(
 
 
 def import_results(config: dict, input_path: str | None = None) -> dict:
-    """Import Claude Code analysis results from JSON back into the database.
-
-    Expects a JSON file with an array of objects, each having:
-    - item_index, is_valid_pain_point, problem_summary, category,
-      frustration_level, solvability_score, market_size_score, app_idea
-    """
+    """Import Claude Code analysis results from JSON back into the database."""
     db = get_db()
     input_path = input_path or IMPORT_PATH
 
-    # Load the original export to map item_index → source metadata
-    export_path = EXPORT_PATH
-    with open(export_path) as f:
+    with open(EXPORT_PATH) as f:
         export_data = json.load(f)
     items_by_index = {item["item_index"]: item for item in export_data["items"]}
 
-    # Load results
     with open(input_path) as f:
         results = json.load(f)
 
-    # Handle both bare array and {"results": [...]} wrapper
     if isinstance(results, dict):
         results = results.get("results", results.get("items", []))
 
@@ -211,12 +172,7 @@ def import_results(config: dict, input_path: str | None = None) -> dict:
             continue
 
         if not result.get("is_valid_pain_point", True):
-            # Mark as not a pain point so we don't re-export
-            table = {
-                "post": "posts",
-                "comment": "comments",
-                "tweet": "tweets",
-            }[item["source_type"]]
+            table = {"post": "posts", "comment": "comments"}[item["source_type"]]
             db.execute(
                 f"UPDATE {table} SET is_pain_point = 0 WHERE id = ?",
                 (item["source_id"],),
