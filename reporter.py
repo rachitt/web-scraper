@@ -1,0 +1,250 @@
+"""Reporting and output for pain point analysis results."""
+
+import argparse
+import csv
+import sys
+
+from tabulate import tabulate
+
+from db import get_db
+
+
+def get_pain_points(
+    category: str | None = None,
+    min_score: float | None = None,
+    validated_only: bool = False,
+    platform: str = "all",
+    limit: int = 50,
+) -> list[dict]:
+    """Query pain points with optional filters."""
+    db = get_db()
+
+    conditions = []
+    params = []
+
+    if category:
+        conditions.append("pp.category = ?")
+        params.append(category)
+
+    if min_score is not None:
+        conditions.append("pp.opportunity_score >= ?")
+        params.append(min_score)
+
+    if validated_only:
+        conditions.append("pp.cross_platform_validated = 1")
+
+    if platform == "reddit":
+        conditions.append("pp.source_platform = 'reddit'")
+    elif platform == "x":
+        conditions.append("pp.source_platform = 'x'")
+
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    query = f"""
+        SELECT pp.id, pp.opportunity_score, pp.problem_summary, pp.category,
+               pp.source_platform, pp.source_type, pp.cross_platform_validated,
+               pp.app_idea, pp.frustration_level, pp.solvability_score,
+               pp.market_size_score, pp.frequency_score
+        FROM pain_points pp
+        {where}
+        ORDER BY pp.opportunity_score DESC
+        LIMIT ?
+    """
+    params.append(limit)
+
+    return [dict(r) for r in db.execute(query, params).fetchall()]
+
+
+def print_table(pain_points: list[dict]) -> None:
+    """Print pain points as a formatted terminal table."""
+    if not pain_points:
+        print("No pain points found matching filters.")
+        return
+
+    headers = ["#", "Score", "Problem", "Category", "Platform", "Valid", "App Idea"]
+    rows = []
+
+    for i, pp in enumerate(pain_points, 1):
+        summary = pp["problem_summary"] or ""
+        if len(summary) > 60:
+            summary = summary[:57] + "..."
+
+        idea = pp["app_idea"] or ""
+        if len(idea) > 45:
+            idea = idea[:42] + "..."
+
+        validated = "Y" if pp["cross_platform_validated"] else ""
+        platform = pp["source_platform"]
+
+        rows.append([
+            i,
+            pp["opportunity_score"],
+            summary,
+            pp["category"],
+            platform,
+            validated,
+            idea,
+        ])
+
+    print(tabulate(rows, headers=headers, tablefmt="simple", floatfmt=".2f"))
+    print(f"\n{len(pain_points)} results shown")
+
+
+def export_csv(pain_points: list[dict], output_path: str) -> None:
+    """Export pain points to CSV file."""
+    if not pain_points:
+        print("No pain points to export.")
+        return
+
+    fieldnames = [
+        "rank",
+        "opportunity_score",
+        "problem_summary",
+        "category",
+        "source_platform",
+        "source_type",
+        "cross_platform_validated",
+        "frustration_level",
+        "solvability_score",
+        "market_size_score",
+        "frequency_score",
+        "app_idea",
+    ]
+
+    with open(output_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for i, pp in enumerate(pain_points, 1):
+            row = {k: pp.get(k, "") for k in fieldnames}
+            row["rank"] = i
+            row["cross_platform_validated"] = "yes" if pp["cross_platform_validated"] else "no"
+            writer.writerow(row)
+
+    print(f"Exported {len(pain_points)} pain points to {output_path}")
+
+
+def print_stats() -> None:
+    """Print summary statistics across all data."""
+    db = get_db()
+
+    print("=" * 60)
+    print("PIPELINE STATS")
+    print("=" * 60)
+
+    # Posts
+    post_stats = db.execute(
+        """SELECT
+            COUNT(*) as total,
+            SUM(CASE WHEN is_pain_point IS NULL THEN 1 ELSE 0 END) as unprocessed,
+            SUM(CASE WHEN is_pain_point = 0 THEN 1 ELSE 0 END) as filtered,
+            SUM(CASE WHEN is_pain_point = 1 THEN 1 ELSE 0 END) as passed
+           FROM posts"""
+    ).fetchone()
+
+    comment_stats = db.execute(
+        """SELECT
+            COUNT(*) as total,
+            SUM(CASE WHEN is_pain_point IS NULL THEN 1 ELSE 0 END) as unprocessed,
+            SUM(CASE WHEN is_pain_point = 0 THEN 1 ELSE 0 END) as filtered,
+            SUM(CASE WHEN is_pain_point = 1 THEN 1 ELSE 0 END) as passed
+           FROM comments"""
+    ).fetchone()
+
+    tweet_stats = db.execute(
+        """SELECT
+            COUNT(*) as total,
+            SUM(CASE WHEN is_pain_point IS NULL THEN 1 ELSE 0 END) as unprocessed,
+            SUM(CASE WHEN is_pain_point = 0 THEN 1 ELSE 0 END) as filtered,
+            SUM(CASE WHEN is_pain_point = 1 THEN 1 ELSE 0 END) as passed
+           FROM tweets"""
+    ).fetchone()
+
+    content_rows = [
+        ["Posts", post_stats["total"], post_stats["unprocessed"], post_stats["filtered"], post_stats["passed"]],
+        ["Comments", comment_stats["total"], comment_stats["unprocessed"], comment_stats["filtered"], comment_stats["passed"]],
+        ["Tweets", tweet_stats["total"], tweet_stats["unprocessed"], tweet_stats["filtered"], tweet_stats["passed"]],
+    ]
+    print("\nContent Pipeline:")
+    print(tabulate(content_rows, headers=["Type", "Total", "Unprocessed", "Filtered", "Passed"], tablefmt="simple"))
+
+    # Pain points by platform
+    platform_stats = db.execute(
+        """SELECT source_platform, COUNT(*) as count,
+                  SUM(CASE WHEN cross_platform_validated THEN 1 ELSE 0 END) as validated
+           FROM pain_points GROUP BY source_platform"""
+    ).fetchall()
+
+    if platform_stats:
+        print("\nPain Points by Platform:")
+        plat_rows = [[r["source_platform"], r["count"], r["validated"]] for r in platform_stats]
+        print(tabulate(plat_rows, headers=["Platform", "Count", "Validated"], tablefmt="simple"))
+
+    # Pain points by category
+    category_stats = db.execute(
+        """SELECT category, COUNT(*) as count,
+                  ROUND(AVG(opportunity_score), 2) as avg_score
+           FROM pain_points GROUP BY category ORDER BY count DESC"""
+    ).fetchall()
+
+    if category_stats:
+        print("\nPain Points by Category:")
+        cat_rows = [[r["category"], r["count"], r["avg_score"]] for r in category_stats]
+        print(tabulate(cat_rows, headers=["Category", "Count", "Avg Score"], tablefmt="simple"))
+
+    # By subreddit (Reddit only)
+    sub_stats = db.execute(
+        """SELECT p.subreddit, COUNT(*) as count
+           FROM pain_points pp
+           JOIN posts p ON pp.source_id = p.id AND pp.source_type = 'post'
+           WHERE pp.source_platform = 'reddit'
+           GROUP BY p.subreddit ORDER BY count DESC LIMIT 10"""
+    ).fetchall()
+
+    if sub_stats:
+        print("\nTop Subreddits:")
+        sub_rows = [[r["subreddit"], r["count"]] for r in sub_stats]
+        print(tabulate(sub_rows, headers=["Subreddit", "Pain Points"], tablefmt="simple"))
+
+    print()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Pain point analysis reports")
+    subparsers = parser.add_subparsers(dest="command", help="Command to run")
+
+    # Report command
+    report_parser = subparsers.add_parser("report", help="Show pain point rankings")
+    report_parser.add_argument("--category", help="Filter by category")
+    report_parser.add_argument("--min-score", type=float, help="Minimum opportunity score")
+    report_parser.add_argument("--validated-only", action="store_true", help="Only cross-platform validated")
+    report_parser.add_argument("--platform", choices=["reddit", "x", "all"], default="all", help="Filter by platform")
+    report_parser.add_argument("--limit", type=int, default=50, help="Max results")
+    report_parser.add_argument("--csv", metavar="FILE", help="Export to CSV file")
+
+    # Stats command
+    subparsers.add_parser("stats", help="Show pipeline statistics")
+
+    args = parser.parse_args()
+
+    if args.command == "report":
+        results = get_pain_points(
+            category=args.category,
+            min_score=args.min_score,
+            validated_only=args.validated_only,
+            platform=args.platform,
+            limit=args.limit,
+        )
+        if args.csv:
+            export_csv(results, args.csv)
+        else:
+            print_table(results)
+
+    elif args.command == "stats":
+        print_stats()
+
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
