@@ -8,13 +8,17 @@ import db
 from models import Comment, Post
 
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-BASE_URL = "https://www.reddit.com"
+BASE_URL = "https://old.reddit.com"
 DELAY_BETWEEN_REQUESTS = 2.0  # be polite
 
 
 def _get_client() -> httpx.Client:
     return httpx.Client(
-        headers={"User-Agent": USER_AGENT},
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
         follow_redirects=True,
         timeout=30.0,
     )
